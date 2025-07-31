@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PipeWire Graph Visualizer</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #111827; /* bg-gray-900 */
+            color: #f3f4f6; /* text-gray-100 */
+        }
+        .node {
+            cursor: grab;
+        }
+        .node:active {
+            cursor: grabbing;
+        }
+        .link {
+            stroke: #4b5563; /* gray-600 */
+            stroke-opacity: 0.8;
+            stroke-width: 2px;
+        }
+        .node-rect {
+            stroke-width: 2px;
+            stroke: #4b5563; /* gray-600 */
+            rx: 8px;
+            ry: 8px;
+            transition: filter 0.2s;
+        }
+        .node-rect:hover {
+            filter: drop-shadow(0 0 5px #60a5fa);
+        }
+        .node-text {
+            font-size: 12px;
+            font-weight: 500;
+            fill: #e5e7eb; /* gray-200 */
+            pointer-events: none;
+            text-anchor: middle;
+        }
+        .port {
+            stroke: #9ca3af; /* gray-400 */
+            stroke-width: 1px;
+        }
+        .port-text {
+            font-size: 9px;
+            fill: #d1d5db; /* gray-300 */
+            pointer-events: none;
+        }
+        #graph-container {
+            width: 100%;
+            height: 100%;
+            border-radius: 0.5rem;
+            background-color: #1f2937; /* bg-gray-800 */
+            border: 1px solid #374151; /* border-gray-700 */
+        }
+    </style>
+</head>
+<body class="flex flex-col h-screen p-4 gap-4">
+
+    <header class="text-center flex-shrink-0">
+        <h1 class="text-2xl font-bold text-white">PipeWire Graph Visualizer</h1>
+        <p class="text-gray-400">Visualize your PipeWire audio graph from a `pw-dump` JSON file.</p>
+    </header>
+
+    <div class="flex-shrink-0 bg-gray-800 border border-gray-700 p-4 rounded-lg flex flex-col md:flex-row items-center justify-center gap-4">
+        <div class="text-gray-300 text-sm">
+            <strong class="text-white">Step 1:</strong> Open a terminal and run this command: <code class="bg-gray-900 text-blue-400 px-2 py-1 rounded-md">pw-dump > pipewire-graph.json</code>
+        </div>
+        <div class="text-gray-300 text-sm">
+            <strong class="text-white">Step 2:</strong> Click the button to load the generated <code class="bg-gray-900 text-blue-400 px-2 py-1 rounded-md">pipewire-graph.json</code> file.
+        </div>
+        <input type="file" id="file-input" accept=".json" class="block w-full md:w-auto text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 transition"/>
+    </div>
+    
+    <main id="graph-container" class="flex-grow relative">
+         <div id="placeholder" class="absolute inset-0 flex items-center justify-center text-gray-500">
+            <p>Load a JSON file to see the graph</p>
+        </div>
+        <svg id="graph-svg" class="w-full h-full"></svg>
+    </main>
+
+    <script>
+        const fileInput = document.getElementById('file-input');
+        const svgElement = d3.select("#graph-svg");
+        const placeholder = document.getElementById('placeholder');
+        const container = document.getElementById('graph-container');
+
+        fileInput.addEventListener('change', function(event) {
+            const file = event.target.files[0];
+            if (!file) {
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    placeholder.style.display = 'none';
+                    renderGraph(data);
+                } catch (error) {
+                    placeholder.style.display = 'flex';
+                    placeholder.innerText = 'Error: Invalid JSON file.';
+                    console.error("Error parsing JSON:", error);
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        function getNodeColor(node) {
+            const mediaClass = node.info?.props?.['media.class'] || '';
+            if (mediaClass.includes('Stream/Output') || mediaClass.includes('Audio/Sink')) {
+                return '#1d4ed8'; // blue-700
+            }
+            if (mediaClass.includes('Stream/Input') || mediaClass.includes('Audio/Source')) {
+                return '#be123c'; // rose-700
+            }
+            if (mediaClass.includes('Application')) {
+                return '#047857'; // emerald-700
+            }
+            return '#57534e'; // stone-600
+        }
+
+        function renderGraph(data) {
+            svgElement.selectAll("*").remove(); // Clear previous graph
+            
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+
+            // 1. Process data
+            const nodes = data
+                .filter(d => d.type === 'PipeWire:Interface:Node')
+                .map(d => ({
+                    id: d.id,
+                    name: d.info?.props?.['node.description'] || d.info?.props?.['application.name'] || `Node ${d.id}`,
+                    ports: [],
+                    ...d
+                }));
+
+            const ports = data
+                .filter(d => d.type === 'PipeWire:Interface:Port')
+                .map(d => ({
+                    id: d.id,
+                    nodeId: d.info?.props?.['node.id'],
+                    direction: d.info?.direction,
+                    name: d.info?.props?.['port.alias'] || d.info?.props?.['port.name'] || `Port ${d.id}`,
+                    ...d
+                }));
+
+            const nodeMap = new Map(nodes.map(n => [n.id, n]));
+
+            ports.forEach(port => {
+                const node = nodeMap.get(port.nodeId);
+                if (node) {
+                    node.ports.push(port);
+                }
+            });
+            
+            const links = data
+                .filter(d => d.type === 'PipeWire:Interface:Link')
+                .map(d => ({
+                    source: d.info['output-node-id'],
+                    target: d.info['input-node-id'],
+                    id: d.id
+                }));
+
+            // 2. Setup D3 simulation
+            const simulation = d3.forceSimulation(nodes)
+                .force("link", d3.forceLink(links).id(d => d.id).distance(200))
+                .force("charge", d3.forceManyBody().strength(-400))
+                .force("center", d3.forceCenter(width / 2, height / 2))
+                .force("collision", d3.forceCollide().radius(80));
+
+            const g = svgElement.append("g");
+
+            // 3. Draw links
+            const link = g.append("g")
+                .attr("class", "links")
+                .selectAll("line")
+                .data(links)
+                .join("line")
+                .attr("class", "link");
+
+            // 4. Draw nodes
+            const node = g.append("g")
+                .attr("class", "nodes")
+                .selectAll("g")
+                .data(nodes)
+                .join("g")
+                .attr("class", "node");
+
+            const nodeWidth = 140;
+            const nodeHeight = 50;
+
+            node.append("rect")
+                .attr("class", "node-rect")
+                .attr("width", nodeWidth)
+                .attr("height", nodeHeight)
+                .attr("x", -nodeWidth / 2)
+                .attr("y", -nodeHeight / 2)
+                .attr("fill", d => getNodeColor(d));
+
+            node.append("text")
+                .attr("class", "node-text")
+                .attr("y", 5)
+                .text(d => d.name.length > 20 ? d.name.substring(0, 18) + '...' : d.name);
+            
+            // 5. Add drag behavior
+            const drag = d3.drag()
+                .on("start", (event, d) => {
+                    if (!event.active) simulation.alphaTarget(0.3).restart();
+                    d.fx = d.x;
+                    d.fy = d.y;
+                })
+                .on("drag", (event, d) => {
+                    d.fx = event.x;
+                    d.fy = event.y;
+                })
+                .on("end", (event, d) => {
+                    if (!event.active) simulation.alphaTarget(0);
+                    d.fx = null;
+                    d.fy = null;
+                });
+            
+            node.call(drag);
+
+            // 6. Add zoom behavior
+            const zoom = d3.zoom()
+                .scaleExtent([0.1, 4])
+                .on("zoom", (event) => {
+                    g.attr("transform", event.transform);
+                });
+
+            svgElement.call(zoom);
+
+            // 7. Simulation tick function
+            simulation.on("tick", () => {
+                link
+                    .attr("x1", d => d.source.x)
+                    .attr("y1", d => d.source.y)
+                    .attr("x2", d => d.target.x)
+                    .attr("y2", d => d.target.y);
+
+                node
+                    .attr("transform", d => `translate(${d.x},${d.y})`);
+            });
+        }
+    </script>
+</body>
+</html>
